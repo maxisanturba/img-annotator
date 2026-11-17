@@ -9,7 +9,7 @@ Editor de capturas simple para Linux: anotar y recortar, sin nada más. Lo hice 
 
 - **Anotar:** flecha, rectángulo, círculo y texto, con color, grosor y tamaño de texto.
 - **Recortar:** con tiradores, tercios, tamaño en vivo y proporciones fijas (1:1, 4:3, 16:9…).
-- **Rotar** 90° a izquierda o derecha; las anotaciones giran con la imagen.
+- **Rotar** 90° a izquierda o derecha, **enderezar** con cualquier ángulo (con cuadrícula de guía, para nivelar un horizonte) y **voltear** horizontal o vertical. Las anotaciones acompañan a la imagen.
 - **Deshacer/rehacer** de todo, incluido el recorte.
 - **Carpeta:** abrís una imagen y pasás a las demás con las flechas del teclado.
 - Copiar al portapapeles (Ctrl+C), guardar como PNG/JPG, zoom con la rueda.
@@ -22,7 +22,9 @@ Editor de capturas simple para Linux: anotar y recortar, sin nada más. Lo hice 
 | A / R / O / T | Flecha / rectángulo / círculo / texto |
 | C | Recortar (Enter aplica, Esc cancela) |
 | Shift | Cuadrado, círculo perfecto o flecha a 45° |
+| E | Enderezar (Enter aplica, Esc cancela) |
 | Ctrl+L / Ctrl+R | Rotar a la izquierda / derecha |
+| Ctrl+Shift+H / Ctrl+Shift+V | Voltear horizontal / vertical |
 | Ctrl+Z / Ctrl+Shift+Z | Deshacer / rehacer |
 | Ctrl+C / Ctrl+S / Ctrl+O | Copiar / guardar como / abrir |
 | ← / → | Imagen anterior / siguiente |

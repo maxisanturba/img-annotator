@@ -11,7 +11,9 @@ Herramientas (teclas):
     O         círculo/elipse (Shift: círculo)
     T         texto: clic y escribir; Esc o clic afuera termina
     C         recortar: arrastrá los bordes, Enter aplica, Esc cancela
+    E         enderezar: girar unos grados con cuadrícula, Enter aplica
     Ctrl+L / Ctrl+R   rotar 90° a la izquierda / derecha (las anotaciones giran con la imagen)
+    Ctrl+Shift+H / Ctrl+Shift+V   voltear horizontal / vertical
 
 Otros atajos:
     Flecha izq/der, RePág/AvPág   imagen anterior / siguiente de la carpeta
@@ -38,7 +40,7 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem, QGraphicsItem, QStyleOptionGraphicsItem, QStyle,
     QToolBar, QColorDialog, QSpinBox, QSlider, QLabel, QFileDialog,
     QMessageBox, QStatusBar, QWidget, QComboBox, QPushButton,
-    QAbstractButton, QAbstractSpinBox, QSizePolicy, QHBoxLayout,
+    QAbstractButton, QAbstractSpinBox, QDoubleSpinBox, QSizePolicy, QHBoxLayout,
 )
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
@@ -180,6 +182,24 @@ def make_icon(kind: str, color: str = TEXT) -> QIcon:
         path2.lineTo(17, 7)
         path2.lineTo(17, 21.5)
         p.drawPath(path2)
+    elif kind == "straighten":
+        p.drawLine(QPointF(4, 16), QPointF(20, 8))
+        dash = QPen(c, 1.6, Qt.DashLine, Qt.RoundCap)
+        dash.setDashPattern([2.0, 2.4])
+        p.setPen(dash)
+        p.drawLine(QPointF(4, 12), QPointF(20, 12))
+    elif kind in ("flipx", "flipy"):
+        if kind == "flipy":
+            p.translate(12, 12)
+            p.rotate(90)
+            p.translate(-12, -12)
+        p.drawPolygon(QPolygonF([QPointF(9, 6.5), QPointF(9, 17.5), QPointF(3, 17.5)]))
+        p.setBrush(c)
+        p.drawPolygon(QPolygonF([QPointF(15, 6.5), QPointF(15, 17.5), QPointF(21, 17.5)]))
+        dash = QPen(c, 1.6, Qt.DashLine, Qt.RoundCap)
+        dash.setDashPattern([2.0, 2.4])
+        p.setPen(dash)
+        p.drawLine(QPointF(12, 2.5), QPointF(12, 21.5))
     elif kind in ("rotate_left", "rotate_right"):
         c0, rad = QPointF(12, 12), 7.0
 
@@ -313,6 +333,10 @@ class ArrowItem(QGraphicsItem):
     def set_end(self, p: QPointF):
         self.prepareGeometryChange()
         self.p2 = QPointF(p)
+
+    def set_points(self, p1: QPointF, p2: QPointF):
+        self.prepareGeometryChange()
+        self.p1, self.p2 = QPointF(p1), QPointF(p2)
 
     def set_style(self, color=None, width=None):
         self.prepareGeometryChange()
@@ -462,6 +486,19 @@ class CropOverlay(QGraphicsItem):
     def paint(self, painter, option, widget=None):
         c = self.canvas
         r = c.crop_rect
+        if c.tool == "straighten":
+            full = c.scene_.sceneRect()
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            pen = QPen(QColor(255, 255, 255, 110), 1)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            n = 10
+            for i in range(1, n):
+                x = full.left() + full.width() * i / n
+                y = full.top() + full.height() * i / n
+                painter.drawLine(QPointF(x, full.top()), QPointF(x, full.bottom()))
+                painter.drawLine(QPointF(full.left(), y), QPointF(full.right(), y))
+            return
         if r is None:
             return
         s = 1.0 / max(c.transform().m11(), 1e-6)  # unidades de escena por píxel de pantalla
@@ -603,41 +640,84 @@ class CropCmd(QUndoCommand):
         self._apply(self.old_pixmap, QPointF(self.rect.x(), self.rect.y()))
 
 
-class RotateCmd(QUndoCommand):
-    """Gira la imagen 90° y lleva las anotaciones con ella (cada una gira sobre su centro)."""
+def item_state(it) -> dict:
+    st = {"rot": it.rotation(), "pos": QPointF(it.pos())}
+    if isinstance(it, ArrowItem):
+        st["pts"] = (QPointF(it.p1), QPointF(it.p2))
+    return st
 
-    def __init__(self, canvas, clockwise: bool):
-        super().__init__("Rotar a la derecha" if clockwise else "Rotar a la izquierda")
-        self.canvas, self.cw = canvas, clockwise
+
+def restore_item(it, st: dict):
+    it.setRotation(st["rot"])
+    it.setPos(st["pos"])
+    if "pts" in st:
+        it.set_points(*st["pts"])
+
+
+def move_center_to(it, target: QPointF):
+    c = it.mapToScene(it.boundingRect().center())
+    it.moveBy(target.x() - c.x(), target.y() - c.y())
+
+
+class GeometryCmd(QUndoCommand):
+    """Rota (cualquier ángulo) o voltea la imagen y lleva las anotaciones con ella.
+    Al voltear, las anotaciones cambian de sitio pero el texto no se espeja."""
+
+    TEXTS = {"rotate": "Rotar", "flipx": "Voltear horizontal", "flipy": "Voltear vertical"}
+
+    def __init__(self, canvas, kind: str, angle: float = 0.0):
+        super().__init__(self.TEXTS[kind])
+        self.canvas, self.kind, self.angle = canvas, kind, angle
         self.old_pixmap = canvas.pixmap_item.pixmap()
         self.new_pixmap = None
-        self.before = []  # (item, rotación, pos)
+        self.before = []  # (item, estado)
         self.after = []
 
     def _set_scene(self, pixmap, states):
         cv = self.canvas
         cv.pixmap_item.setPixmap(pixmap)
-        for it, rot, pos in states:
-            it.setRotation(rot)
-            it.setPos(pos)
+        for it, st in states:
+            restore_item(it, st)
         cv.scene_.setSceneRect(QRectF(0, 0, pixmap.width(), pixmap.height()))
         cv.crop_rect = QRectF(cv.scene_.sceneRect()) if cv.tool == "crop" else None
         cv.view_changed()
 
+    def _compute(self):
+        old = self.old_pixmap
+        w, h = old.width(), old.height()
+        if self.kind == "rotate":
+            self.new_pixmap = old.transformed(QTransform().rotate(self.angle), Qt.SmoothTransformation)
+        else:
+            self.new_pixmap = QPixmap.fromImage(
+                old.toImage().mirrored(self.kind == "flipx", self.kind == "flipy"))
+        nw, nh = self.new_pixmap.width(), self.new_pixmap.height()
+        rad = math.radians(self.angle)
+        for it in self.canvas.annotation_items():
+            self.before.append((it, item_state(it)))
+            c = it.mapToScene(it.boundingRect().center())
+            if self.kind == "rotate":
+                vx, vy = c.x() - w / 2, c.y() - h / 2
+                target = QPointF(vx * math.cos(rad) - vy * math.sin(rad) + nw / 2,
+                                 vx * math.sin(rad) + vy * math.cos(rad) + nh / 2)
+                it.setRotation(it.rotation() + self.angle)
+                move_center_to(it, target)
+            else:
+                fx = self.kind == "flipx"
+                mirror = (lambda q: QPointF(w - q.x(), q.y())) if fx else (lambda q: QPointF(q.x(), h - q.y()))
+                if isinstance(it, ArrowItem):  # la flecha sí se espeja: cambia de dirección
+                    m1, m2 = mirror(it.mapToScene(it.p1)), mirror(it.mapToScene(it.p2))
+                    it.setRotation(0)
+                    it.setPos(0, 0)
+                    it.set_points(m1, m2)
+                else:
+                    if not isinstance(it, EditableTextItem):
+                        it.setRotation(-it.rotation())
+                    move_center_to(it, mirror(c))
+            self.after.append((it, item_state(it)))
+
     def redo(self):
-        if self.new_pixmap is None:  # primera vez: se calcula
-            cv = self.canvas
-            w, h = self.old_pixmap.width(), self.old_pixmap.height()
-            self.new_pixmap = self.old_pixmap.transformed(
-                QTransform().rotate(90 if self.cw else -90), Qt.SmoothTransformation)
-            for it in cv.annotation_items():
-                self.before.append((it, it.rotation(), QPointF(it.pos())))
-                c = it.mapToScene(it.boundingRect().center())
-                target = QPointF(h - c.y(), c.x()) if self.cw else QPointF(c.y(), w - c.x())
-                it.setRotation(it.rotation() + (90 if self.cw else -90))
-                it.moveBy(target.x() - it.mapToScene(it.boundingRect().center()).x(),
-                          target.y() - it.mapToScene(it.boundingRect().center()).y())
-                self.after.append((it, it.rotation(), QPointF(it.pos())))
+        if self.new_pixmap is None:
+            self._compute()
         self._set_scene(self.new_pixmap, self.after)
 
     def undo(self):
@@ -678,6 +758,7 @@ class Canvas(QGraphicsView):
         self.fit_mode = True
         self.crop_rect: QRectF | None = None
         self.crop_ratio: float | None = None
+        self.straighten_angle = 0.0
         self._crop_drag = None
         self._drawing_item = None
         self._start_pos = None
@@ -709,7 +790,7 @@ class Canvas(QGraphicsView):
         self.pixmap_item.setTransformationMode(Qt.SmoothTransformation)
         self.scene_.addItem(self.pixmap_item)
         self.overlay = CropOverlay(self)
-        self.overlay.setVisible(self.tool == "crop")
+        self.overlay.setVisible(self.tool in ("crop", "straighten"))
         self.scene_.addItem(self.overlay)
         self.scene_.setSceneRect(QRectF(0, 0, pixmap.width(), pixmap.height()))
         if self.tool == "crop":
@@ -718,6 +799,8 @@ class Canvas(QGraphicsView):
         self.fit()
 
     def set_tool(self, tool: str):
+        if self.tool == "straighten" and tool != "straighten":
+            self.set_straighten(0.0)
         if tool != "text":
             self.scene_.setFocusItem(None)  # cierra un texto en edición
         self.tool = tool
@@ -725,10 +808,11 @@ class Canvas(QGraphicsView):
         if tool != "select":
             self.scene_.clearSelection()
         if self.overlay is not None:
-            self.overlay.setVisible(tool == "crop")
+            self.overlay.setVisible(tool in ("crop", "straighten"))
         self.crop_rect = QRectF(self.scene_.sceneRect()) if (tool == "crop" and self.pixmap_item) else None
         self._crop_drag = None
-        cursor = {"select": Qt.ArrowCursor, "text": Qt.IBeamCursor}.get(tool, Qt.CrossCursor)
+        cursor = {"select": Qt.ArrowCursor, "text": Qt.IBeamCursor,
+                  "straighten": Qt.ArrowCursor}.get(tool, Qt.CrossCursor)
         self.viewport().setCursor(cursor)
         self.scene_.update()
 
@@ -932,12 +1016,32 @@ class Canvas(QGraphicsView):
             cur = self.CURSORS[hit[1]]
         self.viewport().setCursor(cur)
 
-    def rotate(self, clockwise: bool):
+    def transform_image(self, kind: str, angle: float = 0.0):
         if not self.pixmap_item:
             return
         self.scene_.setFocusItem(None)  # cierra un texto en edición
         self.scene_.clearSelection()
-        self.win.undo_stack.push(RotateCmd(self, clockwise))
+        self.win.undo_stack.push(GeometryCmd(self, kind, angle))
+
+    def rotate(self, clockwise: bool):
+        self.transform_image("rotate", 90.0 if clockwise else -90.0)
+
+    def set_straighten(self, angle: float):
+        """Vista previa del enderezado: gira solo la imagen base, sin tocar las anotaciones."""
+        self.straighten_angle = angle
+        if self.pixmap_item:
+            pm = self.pixmap_item.pixmap()
+            self.pixmap_item.setTransformOriginPoint(pm.width() / 2, pm.height() / 2)
+            self.pixmap_item.setRotation(angle)
+        self.scene_.update()
+
+    def apply_straighten(self):
+        angle = self.straighten_angle
+        if abs(angle) < 0.05 or not self.pixmap_item:
+            return
+        self.set_straighten(0.0)
+        self.transform_image("rotate", angle)
+        self.win.set_tool("select")
 
     def apply_crop(self):
         r = self.crop_rect
@@ -980,6 +1084,8 @@ class Canvas(QGraphicsView):
             return
         if self.tool == "crop":
             self._crop_press(pos)
+            return
+        if self.tool == "straighten":
             return
         if self.tool == "text":
             item = self.itemAt(event.position().toPoint())
@@ -1081,9 +1187,13 @@ class Canvas(QGraphicsView):
         if isinstance(self.scene_.focusItem(), EditableTextItem):
             super().keyPressEvent(event)
             return
-        if self.tool == "crop" and event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            self.apply_crop()
-            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if self.tool == "crop":
+                self.apply_crop()
+                return
+            if self.tool == "straighten":
+                self.apply_straighten()
+                return
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.win.delete_selected()
             return
@@ -1124,6 +1234,7 @@ TOOLS = [
     ("ellipse", "Círculo", "O", "Arrastrá para dibujar · Shift: círculo perfecto"),
     ("text", "Texto", "T", "Clic y escribí · Esc o clic afuera para terminar"),
     ("crop", "Recortar", "C", "Arrastrá los bordes · Enter aplica · Esc cancela"),
+    ("straighten", "Enderezar", "E", "Girá unos grados con la cuadrícula de guía · Enter aplica · Esc cancela"),
 ]
 
 
@@ -1192,6 +1303,13 @@ class MainWindow(QMainWindow):
             act.setToolTip(f"{name} ({key})")
             act.setShortcut(key)
             act.triggered.connect(partial(self.canvas.rotate, cw))
+            tools.addAction(act)
+        for kind, name, key in (("flipx", "Voltear horizontal", "Ctrl+Shift+H"),
+                                ("flipy", "Voltear vertical", "Ctrl+Shift+V")):
+            act = QAction(make_icon(kind), name, self)
+            act.setToolTip(f"{name} ({key})")
+            act.setShortcut(key)
+            act.triggered.connect(partial(self.canvas.transform_image, kind))
             tools.addAction(act)
 
         esc = QAction(self)
@@ -1283,6 +1401,35 @@ class MainWindow(QMainWindow):
         lay.addWidget(cancel_btn)
         self.opt_actions["crop"] = opts.addWidget(box)
 
+        # enderezar
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(self._cap("Ángulo"))
+        self.angle_slider = QSlider(Qt.Horizontal)
+        self.angle_slider.setRange(-450, 450)  # décimas de grado
+        self.angle_slider.setFixedWidth(220)
+        self.angle_spin = QDoubleSpinBox()
+        self.angle_spin.setRange(-45.0, 45.0)
+        self.angle_spin.setDecimals(1)
+        self.angle_spin.setSingleStep(0.1)
+        self.angle_spin.setSuffix(" °")
+        self.angle_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.angle_spin.setFixedWidth(72)
+        self.angle_slider.valueChanged.connect(lambda v: self.set_angle(v / 10))
+        self.angle_spin.valueChanged.connect(self.set_angle)
+        lay.addWidget(self.angle_slider)
+        lay.addWidget(self.angle_spin)
+        ok_btn = QPushButton("Aplicar giro")
+        ok_btn.setObjectName("accent")
+        ok_btn.clicked.connect(self.canvas.apply_straighten)
+        no_btn = QPushButton("Cancelar")
+        no_btn.clicked.connect(lambda: self.set_tool("select"))
+        lay.addWidget(ok_btn)
+        lay.addWidget(no_btn)
+        self.opt_actions["straighten"] = opts.addWidget(box)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         opts.addWidget(spacer)
@@ -1351,11 +1498,14 @@ class MainWindow(QMainWindow):
                 a.setChecked(True)
         self.canvas.set_tool(tool)
         show = {
-            "color": tool != "crop",
+            "color": tool not in ("crop", "straighten"),
             "width": tool in ("select", "arrow", "rect", "ellipse"),
             "size": tool in ("select", "text"),
             "crop": tool == "crop",
+            "straighten": tool == "straighten",
         }
+        if tool != "straighten":
+            self.set_angle(0.0, preview=False)
         for k, v in show.items():
             self.opt_actions[k].setVisible(v)
         self.hint_label.setText(self.tool_hints.get(tool, ""))
@@ -1378,6 +1528,17 @@ class MainWindow(QMainWindow):
             self.set_color(col)
         else:
             self.set_color(sw.color)
+
+    def set_angle(self, deg: float, preview: bool = True):
+        deg = round(deg, 1)
+        for w in (self.angle_slider, self.angle_spin):
+            w.blockSignals(True)
+        self.angle_slider.setValue(round(deg * 10))
+        self.angle_spin.setValue(deg)
+        for w in (self.angle_slider, self.angle_spin):
+            w.blockSignals(False)
+        if preview:
+            self.canvas.set_straighten(deg)
 
     def set_width(self, v: int):
         self.canvas.width_px = v
