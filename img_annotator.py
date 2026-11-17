@@ -11,6 +11,7 @@ Herramientas (teclas):
     O         círculo/elipse (Shift: círculo)
     T         texto: clic y escribir; Esc o clic afuera termina
     C         recortar: arrastrá los bordes, Enter aplica, Esc cancela
+    Ctrl+L / Ctrl+R   rotar 90° a la izquierda / derecha (las anotaciones giran con la imagen)
 
 Otros atajos:
     Flecha izq/der, RePág/AvPág   imagen anterior / siguiente de la carpeta
@@ -179,6 +180,25 @@ def make_icon(kind: str, color: str = TEXT) -> QIcon:
         path2.lineTo(17, 7)
         path2.lineTo(17, 21.5)
         p.drawPath(path2)
+    elif kind in ("rotate_left", "rotate_right"):
+        c0, rad = QPointF(12, 12), 7.0
+
+        def on_circle(deg):
+            return QPointF(c0.x() + rad * math.cos(math.radians(deg)), c0.y() - rad * math.sin(math.radians(deg)))
+        flip = kind == "rotate_left"
+        fx = (lambda q: QPointF(24 - q.x(), q.y())) if flip else (lambda q: q)
+        path = QPainterPath(fx(on_circle(100)))
+        for deg in range(100, -140, -5):
+            path.lineTo(fx(on_circle(deg)))
+        p.drawPath(path)
+        a, b = fx(on_circle(-130)), fx(on_circle(-140))
+        n = math.hypot(b.x() - a.x(), b.y() - a.y())
+        d = QPointF((b.x() - a.x()) / n, (b.y() - a.y()) / n)
+        tip = QPointF(b.x() + d.x() * 3.2, b.y() + d.y() * 3.2)
+        head = arrow_head_points(QPointF(tip.x() - d.x() * 10, tip.y() - d.y() * 10), tip, 7.5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        p.drawPolygon(QPolygonF([head[0], head[1], head[2]]))
     elif kind in ("undo", "redo"):
         path = QPainterPath()
         path.moveTo(8, 10)
@@ -583,6 +603,47 @@ class CropCmd(QUndoCommand):
         self._apply(self.old_pixmap, QPointF(self.rect.x(), self.rect.y()))
 
 
+class RotateCmd(QUndoCommand):
+    """Gira la imagen 90° y lleva las anotaciones con ella (cada una gira sobre su centro)."""
+
+    def __init__(self, canvas, clockwise: bool):
+        super().__init__("Rotar a la derecha" if clockwise else "Rotar a la izquierda")
+        self.canvas, self.cw = canvas, clockwise
+        self.old_pixmap = canvas.pixmap_item.pixmap()
+        self.new_pixmap = None
+        self.before = []  # (item, rotación, pos)
+        self.after = []
+
+    def _set_scene(self, pixmap, states):
+        cv = self.canvas
+        cv.pixmap_item.setPixmap(pixmap)
+        for it, rot, pos in states:
+            it.setRotation(rot)
+            it.setPos(pos)
+        cv.scene_.setSceneRect(QRectF(0, 0, pixmap.width(), pixmap.height()))
+        cv.crop_rect = QRectF(cv.scene_.sceneRect()) if cv.tool == "crop" else None
+        cv.view_changed()
+
+    def redo(self):
+        if self.new_pixmap is None:  # primera vez: se calcula
+            cv = self.canvas
+            w, h = self.old_pixmap.width(), self.old_pixmap.height()
+            self.new_pixmap = self.old_pixmap.transformed(
+                QTransform().rotate(90 if self.cw else -90), Qt.SmoothTransformation)
+            for it in cv.annotation_items():
+                self.before.append((it, it.rotation(), QPointF(it.pos())))
+                c = it.mapToScene(it.boundingRect().center())
+                target = QPointF(h - c.y(), c.x()) if self.cw else QPointF(c.y(), w - c.x())
+                it.setRotation(it.rotation() + (90 if self.cw else -90))
+                it.moveBy(target.x() - it.mapToScene(it.boundingRect().center()).x(),
+                          target.y() - it.mapToScene(it.boundingRect().center()).y())
+                self.after.append((it, it.rotation(), QPointF(it.pos())))
+        self._set_scene(self.new_pixmap, self.after)
+
+    def undo(self):
+        self._set_scene(self.old_pixmap, self.before)
+
+
 # ---------------------------------------------------------------- lienzo
 class Canvas(QGraphicsView):
     zoomChanged = Signal(float, bool)  # factor, ajustado a ventana
@@ -871,6 +932,13 @@ class Canvas(QGraphicsView):
             cur = self.CURSORS[hit[1]]
         self.viewport().setCursor(cur)
 
+    def rotate(self, clockwise: bool):
+        if not self.pixmap_item:
+            return
+        self.scene_.setFocusItem(None)  # cierra un texto en edición
+        self.scene_.clearSelection()
+        self.win.undo_stack.push(RotateCmd(self, clockwise))
+
     def apply_crop(self):
         r = self.crop_rect
         if r is None or not self.pixmap_item:
@@ -1116,6 +1184,15 @@ class MainWindow(QMainWindow):
             if key == "text":
                 tools.addSeparator()
         self.tool_group.triggered.connect(lambda a: self.set_tool(a.data()))
+
+        tools.addSeparator()
+        for kind, name, key, cw in (("rotate_left", "Rotar a la izquierda", "Ctrl+L", False),
+                                    ("rotate_right", "Rotar a la derecha", "Ctrl+R", True)):
+            act = QAction(make_icon(kind), name, self)
+            act.setToolTip(f"{name} ({key})")
+            act.setShortcut(key)
+            act.triggered.connect(partial(self.canvas.rotate, cw))
+            tools.addAction(act)
 
         esc = QAction(self)
         esc.setShortcut("Esc")
