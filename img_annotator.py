@@ -9,6 +9,9 @@ Herramientas (teclas):
     A         flecha        (Shift: ángulos de 45°)
     R         rectángulo    (Shift: cuadrado)
     O         círculo/elipse (Shift: círculo)
+    H         resaltador: rectángulo translúcido
+    N         pasos: clic para poner un círculo numerado (1, 2, 3…)
+    P         pixelar: tapa una zona (contraseñas, correos…) con bloques; el tamaño es ajustable
     T         texto: clic y escribir; Esc o clic afuera termina
     C         recortar: arrastrá los bordes, Enter aplica, Esc cancela
     E         enderezar: girar unos grados con cuadrícula, Enter aplica
@@ -182,6 +185,30 @@ def make_icon(kind: str, color: str = TEXT) -> QIcon:
         path2.lineTo(17, 7)
         path2.lineTo(17, 21.5)
         p.drawPath(path2)
+    elif kind == "highlight":
+        fill = QColor(c)
+        fill.setAlpha(120)
+        p.setPen(Qt.NoPen)
+        p.setBrush(fill)
+        p.drawPolygon(QPolygonF([QPointF(14, 3), QPointF(20.5, 9.5), QPointF(12, 18), QPointF(6, 12)]))
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(3.5, 19, 17, 2.8), 1.4, 1.4)
+    elif kind == "blur":
+        p.setPen(Qt.NoPen)
+        faint = QColor(c)
+        faint.setAlpha(90)
+        for i in range(3):
+            for j in range(3):
+                p.setBrush(c if (i + j) % 2 == 0 else faint)
+                p.drawRect(QRectF(4 + i * 5.3, 4 + j * 5.3, 4.8, 4.8))
+    elif kind == "number":
+        p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
+        f = QFont()
+        f.setFamily("Sans")
+        f.setBold(True)
+        f.setPixelSize(13)
+        p.setFont(f)
+        p.drawText(QRectF(0, 0, 24, 24), Qt.AlignCenter, "1")
     elif kind == "straighten":
         p.drawLine(QPointF(4, 16), QPointF(20, 8))
         dash = QPen(c, 1.6, Qt.DashLine, Qt.RoundCap)
@@ -316,6 +343,118 @@ class EllipseItem(QGraphicsEllipseItem):
         painter.setPen(self.pen())
         painter.setBrush(self.brush())
         painter.drawEllipse(self.rect())
+        if self.isSelected():
+            draw_selection(painter, self.boundingRect())
+
+
+class HighlightItem(RectItem):
+    """Resaltador: rectángulo relleno y translúcido, sin borde."""
+
+    ALPHA = 110
+
+    def __init__(self, rect: QRectF, color: QColor):
+        super().__init__(rect)
+        self.setPen(Qt.NoPen)
+        self.set_color(color)
+
+    def set_color(self, color: QColor):
+        c = QColor(color)
+        c.setAlpha(self.ALPHA)
+        self.setBrush(c)
+        self.update()
+
+
+class BlurItem(QGraphicsRectItem):
+    """Pixela lo que hay debajo de su rectángulo. No guarda imagen: lee la imagen base al
+    pintar, así que sigue funcionando si se mueve, se recorta o se gira la imagen. Nunca se
+    rota (GeometryCmd intercambia su ancho y alto en los giros de 90°)."""
+
+    def __init__(self, rect: QRectF, canvas, block: int):
+        super().__init__(rect)
+        self.canvas = canvas
+        self.block = block
+        self._cache = None
+        self.setPen(Qt.NoPen)
+
+    def set_block(self, block: int):
+        self.block = block
+        self._cache = None
+        self.update()
+
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(self.rect())
+        return path
+
+    def paint(self, painter, option, widget=None):
+        base = self.canvas.pixmap_item
+        if base is not None:
+            b = max(2, self.block)
+            full = base.pixmap().rect()
+            scene_r = self.mapRectToScene(self.rect()).toAlignedRect().intersected(full)
+            # la cuadrícula de bloques se alinea con la imagen para que no «tiemble» al redimensionar
+            x0, y0 = scene_r.left() // b * b, scene_r.top() // b * b
+            x1, y1 = -(-(scene_r.right() + 1) // b) * b, -(-(scene_r.bottom() + 1) // b) * b
+            region = QRect(x0, y0, x1 - x0, y1 - y0).intersected(full)
+            if not region.isEmpty():
+                key = (region.x(), region.y(), region.width(), region.height(), b, base.pixmap().cacheKey())
+                if self._cache is None or self._cache[0] != key:
+                    img = base.pixmap().copy(region).toImage()
+                    small = img.scaled(max(1, -(-img.width() // b)), max(1, -(-img.height() // b)),
+                                       Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                    self._cache = (key, QPixmap.fromImage(small.scaled(img.size(), Qt.IgnoreAspectRatio,
+                                                                       Qt.FastTransformation)))
+                painter.save()
+                painter.setClipRect(self.rect())
+                painter.drawPixmap(self.mapFromScene(QPointF(region.topLeft())), self._cache[1])
+                painter.restore()
+        if self.isSelected():
+            draw_selection(painter, self.rect())
+
+
+class NumberItem(QGraphicsItem):
+    """Círculo numerado para señalar pasos."""
+
+    def __init__(self, n: int, color: QColor, size: int):
+        super().__init__()
+        self.n = n
+        self.color = QColor(color)
+        self.size = size
+
+    def _r(self) -> float:
+        return self.size * 0.7
+
+    def set_style(self, color=None, size=None):
+        self.prepareGeometryChange()
+        if color is not None:
+            self.color = QColor(color)
+        if size is not None:
+            self.size = size
+        self.update()
+
+    def boundingRect(self):
+        r = self._r() + 3
+        return QRectF(-r, -r, 2 * r, 2 * r)
+
+    def shape(self):
+        path = QPainterPath()
+        path.addEllipse(QPointF(0, 0), self._r(), self._r())
+        return path
+
+    def paint(self, painter, option, widget=None):
+        r = self._r()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(255, 255, 255, 235), max(2.0, self.size * 0.07)))
+        painter.setBrush(self.color)
+        painter.drawEllipse(QPointF(0, 0), r, r)
+        lum = (0.299 * self.color.red() + 0.587 * self.color.green() + 0.114 * self.color.blue()) / 255
+        painter.setPen(QColor("#111111") if lum > 0.62 else QColor("white"))
+        font = QFont()
+        font.setFamily("Sans")
+        font.setBold(True)
+        font.setPixelSize(max(6, round(self.size * (0.95 if self.n < 10 else 0.75 if self.n < 100 else 0.55))))
+        painter.setFont(font)
+        painter.drawText(QRectF(-r, -r, 2 * r, 2 * r), Qt.AlignCenter, str(self.n))
         if self.isSelected():
             draw_selection(painter, self.boundingRect())
 
@@ -644,6 +783,8 @@ def item_state(it) -> dict:
     st = {"rot": it.rotation(), "pos": QPointF(it.pos())}
     if isinstance(it, ArrowItem):
         st["pts"] = (QPointF(it.p1), QPointF(it.p2))
+    if isinstance(it, BlurItem):
+        st["rect"] = QRectF(it.rect())
     return st
 
 
@@ -652,6 +793,8 @@ def restore_item(it, st: dict):
     it.setPos(st["pos"])
     if "pts" in st:
         it.set_points(*st["pts"])
+    if "rect" in st:
+        it.setRect(st["rect"])
 
 
 def move_center_to(it, target: QPointF):
@@ -699,7 +842,13 @@ class GeometryCmd(QUndoCommand):
                 vx, vy = c.x() - w / 2, c.y() - h / 2
                 target = QPointF(vx * math.cos(rad) - vy * math.sin(rad) + nw / 2,
                                  vx * math.sin(rad) + vy * math.cos(rad) + nh / 2)
-                it.setRotation(it.rotation() + self.angle)
+                if isinstance(it, BlurItem):  # nunca se inclina: solo cambia de ancho/alto en giros de 90°
+                    if round(self.angle / 90) % 2 and abs(self.angle / 90 - round(self.angle / 90)) < 1e-6:
+                        r = it.rect()
+                        it.setRect(QRectF(r.center().x() - r.height() / 2, r.center().y() - r.width() / 2,
+                                          r.height(), r.width()))
+                else:
+                    it.setRotation(it.rotation() + self.angle)
                 move_center_to(it, target)
             else:
                 fx = self.kind == "flipx"
@@ -710,7 +859,7 @@ class GeometryCmd(QUndoCommand):
                     it.setPos(0, 0)
                     it.set_points(m1, m2)
                 else:
-                    if not isinstance(it, EditableTextItem):
+                    if not isinstance(it, (EditableTextItem, BlurItem, NumberItem)):
                         it.setRotation(-it.rotation())
                     move_center_to(it, mirror(c))
             self.after.append((it, item_state(it)))
@@ -755,6 +904,7 @@ class Canvas(QGraphicsView):
         self.color = QColor(PRESET_COLORS[0])
         self.width_px = DEFAULT_WIDTH
         self.text_px = 40
+        self.block_px = 14
         self.fit_mode = True
         self.crop_rect: QRectF | None = None
         self.crop_ratio: float | None = None
@@ -849,7 +999,7 @@ class Canvas(QGraphicsView):
         self.zoomChanged.emit(self.transform().m11(), False)
         self.scene_.update()
 
-    def apply_style(self, color=None, width=None, size=None):
+    def apply_style(self, color=None, width=None, size=None, block=None):
         """Aplica color/grosor/tamaño a lo seleccionado (y al texto en edición)."""
         items = list(self.scene_.selectedItems())
         focus = self.scene_.focusItem()
@@ -867,6 +1017,17 @@ class Canvas(QGraphicsView):
             elif isinstance(it, ArrowItem):
                 it.set_style(color, width)
                 changed = changed or color is not None or width is not None
+            elif isinstance(it, NumberItem):
+                it.set_style(color, size)
+                changed = changed or color is not None or size is not None
+            elif isinstance(it, BlurItem):
+                if block is not None:
+                    it.set_block(block)
+                    changed = True
+            elif isinstance(it, HighlightItem):
+                if color is not None:
+                    it.set_color(color)
+                    changed = True
             elif isinstance(it, (RectItem, EllipseItem)):
                 pen = it.pen()
                 if color is not None:
@@ -1087,6 +1248,14 @@ class Canvas(QGraphicsView):
             return
         if self.tool == "straighten":
             return
+        if self.tool == "number":
+            n = 1 + max([it.n for it in self.annotation_items() if isinstance(it, NumberItem)], default=0)
+            item = NumberItem(n, self.color, self.text_px)
+            item.setPos(pos)
+            set_movable(item)
+            self.add_item(item)
+            self.win.undo_stack.push(AddCmd(self, item, "Añadir paso"))
+            return
         if self.tool == "text":
             item = self.itemAt(event.position().toPoint())
             if isinstance(item, EditableTextItem):
@@ -1105,6 +1274,10 @@ class Canvas(QGraphicsView):
         elif self.tool == "ellipse":
             item = EllipseItem(QRectF(pos, pos))
             item.setPen(make_pen(self.color, self.width_px))
+        elif self.tool == "highlight":
+            item = HighlightItem(QRectF(pos, pos), self.color)
+        elif self.tool == "blur":
+            item = BlurItem(QRectF(pos, pos), self, self.block_px)
         else:
             item = ArrowItem(pos, pos, self.color, self.width_px)
         self._drawing_item = item
@@ -1232,7 +1405,10 @@ TOOLS = [
     ("arrow", "Flecha", "A", "Arrastrá para dibujar · Shift: ángulos de 45°"),
     ("rect", "Rectángulo", "R", "Arrastrá para dibujar · Shift: cuadrado"),
     ("ellipse", "Círculo", "O", "Arrastrá para dibujar · Shift: círculo perfecto"),
+    ("highlight", "Resaltador", "H", "Arrastrá para resaltar una zona sin taparla"),
+    ("number", "Pasos", "N", "Clic para poner el siguiente número · el tamaño es el de «Texto»"),
     ("text", "Texto", "T", "Clic y escribí · Esc o clic afuera para terminar"),
+    ("blur", "Pixelar", "P", "Arrastrá sobre lo que quieras tapar · «Bloque» ajusta qué tan pixelado"),
     ("crop", "Recortar", "C", "Arrastrá los bordes · Enter aplica · Esc cancela"),
     ("straighten", "Enderezar", "E", "Girá unos grados con la cuadrícula de guía · Enter aplica · Esc cancela"),
 ]
@@ -1252,6 +1428,7 @@ class MainWindow(QMainWindow):
         self.index = -1
         self.style_dirty = False
         self._text_size_user = False
+        self._block_user = False
         self.undo_stack = QUndoStack(self)
         self.undo_stack.cleanChanged.connect(lambda _: self.refresh_title())
         self.undo_stack.indexChanged.connect(self._update_dims)
@@ -1292,7 +1469,7 @@ class MainWindow(QMainWindow):
             self.tool_group.addAction(act)
             tools.addAction(act)
             self.tool_hints[key] = hint
-            if key == "text":
+            if key == "blur":
                 tools.addSeparator()
         self.tool_group.triggered.connect(lambda a: self.set_tool(a.data()))
 
@@ -1380,6 +1557,23 @@ class MainWindow(QMainWindow):
         self.size_spin.valueChanged.connect(self.on_text_size)
         lay.addWidget(self.size_spin)
         self.opt_actions["size"] = opts.addWidget(box)
+
+        # pixelado
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(8, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(self._cap("Bloque"))
+        self.block_spin = QSpinBox()
+        self.block_spin.setRange(3, 120)
+        self.block_spin.setSuffix(" px")
+        self.block_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.block_spin.setFixedWidth(64)
+        self.block_spin.setValue(self.canvas.block_px)
+        self.block_spin.setToolTip("Tamaño de los bloques (rueda del ratón para ajustar)")
+        self.block_spin.valueChanged.connect(self.on_block_size)
+        lay.addWidget(self.block_spin)
+        self.opt_actions["block"] = opts.addWidget(box)
 
         # recorte
         box = QWidget()
@@ -1498,9 +1692,10 @@ class MainWindow(QMainWindow):
                 a.setChecked(True)
         self.canvas.set_tool(tool)
         show = {
-            "color": tool not in ("crop", "straighten"),
+            "color": tool not in ("crop", "straighten", "blur"),
             "width": tool in ("select", "arrow", "rect", "ellipse"),
-            "size": tool in ("select", "text"),
+            "size": tool in ("select", "text", "number"),
+            "block": tool in ("select", "blur"),
             "crop": tool == "crop",
             "straighten": tool == "straighten",
         }
@@ -1547,6 +1742,11 @@ class MainWindow(QMainWindow):
             w.setValue(v)
             w.blockSignals(False)
         self.canvas.apply_style(width=v)
+
+    def on_block_size(self, v: int):
+        self._block_user = True
+        self.canvas.block_px = v
+        self.canvas.apply_style(block=v)
 
     def on_text_size(self, v: int):
         self._text_size_user = True
@@ -1629,6 +1829,12 @@ class MainWindow(QMainWindow):
             self.size_spin.blockSignals(True)
             self.size_spin.setValue(px)
             self.size_spin.blockSignals(False)
+        if not self._block_user:  # bloque de pixelado proporcional a la imagen
+            bpx = min(max(round(pixmap.height() / 55), 8), 48)
+            self.canvas.block_px = bpx
+            self.block_spin.blockSignals(True)
+            self.block_spin.setValue(bpx)
+            self.block_spin.blockSignals(False)
         self.mark_clean()
         self.info_label.setText(f"{self.index + 1} / {len(self.images)}  ·  {path.name}")
         self._update_dims()

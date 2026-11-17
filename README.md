@@ -8,6 +8,7 @@ Editor de capturas simple para Linux: anotar y recortar, sin nada más. Lo hice 
 ## Qué hace
 
 - **Anotar:** flecha, rectángulo, círculo y texto, con color, grosor y tamaño de texto.
+- **Resaltador** translúcido, **pasos numerados** (1, 2, 3… automáticos) y **pixelar** una zona para tapar datos sensibles. El pixelado lee la imagen al pintar, así que sigue bien si lo movés, recortás o girás la imagen.
 - **Recortar:** con tiradores, tercios, tamaño en vivo y proporciones fijas (1:1, 4:3, 16:9…).
 - **Rotar** 90° a izquierda o derecha, **enderezar** con cualquier ángulo (con cuadrícula de guía, para nivelar un horizonte) y **voltear** horizontal o vertical. Las anotaciones acompañan a la imagen.
 - **Deshacer/rehacer** de todo, incluido el recorte.
@@ -20,6 +21,7 @@ Editor de capturas simple para Linux: anotar y recortar, sin nada más. Lo hice 
 |---|---|
 | V / Esc | Seleccionar (doble clic en un texto lo edita) |
 | A / R / O / T | Flecha / rectángulo / círculo / texto |
+| H / N / P | Resaltador / pasos numerados / pixelar |
 | C | Recortar (Enter aplica, Esc cancela) |
 | Shift | Cuadrado, círculo perfecto o flecha a 45° |
 | E | Enderezar (Enter aplica, Esc cancela) |
