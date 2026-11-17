@@ -1440,7 +1440,7 @@ class MainWindow(QMainWindow):
 
         if start_path:
             self.open_path(start_path)
-        else:
+        if not self.images:
             QTimer.singleShot(0, self.action_open)
 
     # ---------- construcción ----------
@@ -1801,6 +1801,9 @@ class MainWindow(QMainWindow):
     # ---------- navegación de archivos ----------
     def open_path(self, path: Path):
         path = path.resolve()
+        if not path.exists():
+            QMessageBox.warning(self, "Img Annotator", f"No existe: {path}")
+            return
         if path.is_dir():
             folder, target = path, None
         else:
